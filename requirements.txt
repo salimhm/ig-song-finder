@@ -1,0 +1,11 @@
+Django>=4.2,<5.0
+djangorestframework>=3.14
+django-cors-headers>=4.3
+celery[redis]>=5.3
+redis>=5.0
+psycopg2-binary>=2.9
+yt-dlp>=2024.1
+python-dotenv>=1.0
+requests>=2.31
+gunicorn>=21.2
+pydub>=0.25
