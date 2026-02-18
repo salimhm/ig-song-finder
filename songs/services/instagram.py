@@ -5,12 +5,16 @@ import logging
 import os
 import tempfile
 import subprocess
+import time
 from typing import Optional
 
 import yt_dlp
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
+
+MAX_RETRIES = 3
+RETRY_DELAY = 5  # seconds between retries
 
 
 def extract_audio_from_instagram(url: str, duration: int = 10) -> Optional[str]:
@@ -52,64 +56,101 @@ def extract_audio_from_instagram(url: str, duration: int = 10) -> Optional[str]:
         },
     }
     
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # Extract info first to get the video ID
-            info = ydl.extract_info(url, download=True)
+    # Add proxy support if PROXIES env variable is set
+    proxy_url = os.getenv('PROXIES', '')
+    if proxy_url:
+        ydl_opts['proxy'] = proxy_url
+        logger.info(f"Using proxy for Instagram download: {proxy_url.split('@')[-1] if '@' in proxy_url else 'configured'}")
+    
+    last_exception = None
+    
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                # Extract info first to get the video ID
+                info = ydl.extract_info(url, download=True)
+                
+                if not info:
+                    logger.error(f"Failed to extract info from {url}")
+                    return None
+                
+                video_id = info.get('id', 'unknown')
+                
+                # The output file will be .mp3 after post-processing
+                audio_path = os.path.join(temp_dir, f"{video_id}.mp3")
+                
+                if not os.path.exists(audio_path):
+                    # Try common alternatives
+                    for ext in ['m4a', 'mp4', 'webm']:
+                        alt_path = os.path.join(temp_dir, f"{video_id}.{ext}")
+                        if os.path.exists(alt_path):
+                            audio_path = alt_path
+                            break
+                
+                if not os.path.exists(audio_path):
+                    logger.error(f"Audio file not found after extraction: {audio_path}")
+                    return None
+                
+                # Trim to specified duration using ffmpeg
+                trimmed_path = trim_audio(audio_path, duration)
+                
+                # Use trimmed version if successful, otherwise use full file
+                if trimmed_path and os.path.exists(trimmed_path):
+                    # Remove original, keep trimmed
+                    if trimmed_path != audio_path:
+                        try:
+                            os.remove(audio_path)
+                        except:
+                            pass
+                    return trimmed_path
+                
+                return audio_path
+                
+        except yt_dlp.DownloadError as e:
+            error_msg = str(e).lower()
+            last_exception = e
             
-            if not info:
-                logger.error(f"Failed to extract info from {url}")
-                return None
+            # Non-retryable: content genuinely doesn't exist
+            if 'not exist' in error_msg or '404' in error_msg:
+                logger.error(f"Content not found: {url}")
+                raise Exception("CONTENT_NOT_FOUND: The Instagram content does not exist or has been deleted")
             
-            video_id = info.get('id', 'unknown')
+            # Retryable: rate-limit / login required / proxy issues
+            if 'private' in error_msg or 'login required' in error_msg or 'rate' in error_msg:
+                logger.warning(f"Attempt {attempt}/{MAX_RETRIES} failed for {url}: rate-limit or login required")
+                if attempt < MAX_RETRIES:
+                    logger.info(f"Retrying in {RETRY_DELAY}s...")
+                    time.sleep(RETRY_DELAY)
+                    continue
+                else:
+                    logger.error(f"All {MAX_RETRIES} attempts failed for {url}")
+                    raise Exception("PRIVATE_ACCOUNT: Cannot access content from private accounts")
             
-            # The output file will be .mp3 after post-processing
-            audio_path = os.path.join(temp_dir, f"{video_id}.mp3")
+            # Other download errors - also retry
+            logger.warning(f"Attempt {attempt}/{MAX_RETRIES} failed for {url}: {e}")
+            if attempt < MAX_RETRIES:
+                logger.info(f"Retrying in {RETRY_DELAY}s...")
+                time.sleep(RETRY_DELAY)
+                continue
+            else:
+                logger.error(f"All {MAX_RETRIES} attempts failed for {url}")
+                raise Exception(f"DOWNLOAD_ERROR: {str(e)}")
             
-            if not os.path.exists(audio_path):
-                # Try common alternatives
-                for ext in ['m4a', 'mp4', 'webm']:
-                    alt_path = os.path.join(temp_dir, f"{video_id}.{ext}")
-                    if os.path.exists(alt_path):
-                        audio_path = alt_path
-                        break
-            
-            if not os.path.exists(audio_path):
-                logger.error(f"Audio file not found after extraction: {audio_path}")
-                return None
-            
-            # Trim to specified duration using ffmpeg
-            trimmed_path = trim_audio(audio_path, duration)
-            
-            # Use trimmed version if successful, otherwise use full file
-            if trimmed_path and os.path.exists(trimmed_path):
-                # Remove original, keep trimmed
-                if trimmed_path != audio_path:
-                    try:
-                        os.remove(audio_path)
-                    except:
-                        pass
-                return trimmed_path
-            
-            return audio_path
-            
-    except yt_dlp.DownloadError as e:
-        error_msg = str(e).lower()
-        
-        if 'private' in error_msg or 'login required' in error_msg:
-            logger.error(f"Private account or login required: {url}")
-            raise Exception("PRIVATE_ACCOUNT: Cannot access content from private accounts")
-        
-        if 'not exist' in error_msg or '404' in error_msg:
-            logger.error(f"Content not found: {url}")
-            raise Exception("CONTENT_NOT_FOUND: The Instagram content does not exist or has been deleted")
-        
-        logger.error(f"yt-dlp download error: {e}")
-        raise Exception(f"DOWNLOAD_ERROR: {str(e)}")
-        
-    except Exception as e:
-        logger.error(f"Error extracting audio from Instagram: {e}", exc_info=True)
-        raise
+        except Exception as e:
+            last_exception = e
+            logger.warning(f"Attempt {attempt}/{MAX_RETRIES} - unexpected error for {url}: {e}")
+            if attempt < MAX_RETRIES:
+                logger.info(f"Retrying in {RETRY_DELAY}s...")
+                time.sleep(RETRY_DELAY)
+                continue
+            else:
+                logger.error(f"All {MAX_RETRIES} attempts failed for {url}", exc_info=True)
+                raise
+    
+    # Should not reach here, but just in case
+    if last_exception:
+        raise last_exception
+    return None
 
 
 def trim_audio(audio_path: str, duration: int) -> Optional[str]:
