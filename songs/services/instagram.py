@@ -13,7 +13,7 @@ from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
-MAX_RETRIES = 3
+MAX_RETRIES = 10
 RETRY_DELAY = 5  # seconds between retries
 
 
