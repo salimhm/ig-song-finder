@@ -56,6 +56,17 @@ class FindSongView(APIView):
             }, status=status.HTTP_400_BAD_REQUEST)
         
         url = serializer.validated_data['url']
+        
+        # Reject unsupported URL patterns immediately
+        unsupported_patterns = ['/reels/audio/', '/explore/', '/accounts/']
+        for pattern in unsupported_patterns:
+            if pattern in url:
+                return Response({
+                    'success': False,
+                    'error_code': 'INVALID_URL',
+                    'message': 'This URL type is not supported. Please provide a direct reel URL (e.g. https://www.instagram.com/reels/ABC123/)',
+                }, status=status.HTTP_400_BAD_REQUEST)
+        
         media_id = extract_media_id(url)
         
         # Check cache first

@@ -3,6 +3,7 @@ Instagram audio extraction service using yt-dlp.
 """
 import logging
 import os
+import re
 import tempfile
 import subprocess
 import time
@@ -28,6 +29,19 @@ def extract_audio_from_instagram(url: str, duration: int = 10) -> Optional[str]:
     Returns:
         Path to the extracted audio file, or None if extraction failed
     """
+    # Validate URL pattern
+    unsupported_patterns = [
+        r'/reels/audio/',
+        r'/explore/',
+        r'/accounts/',
+    ]
+    for pattern in unsupported_patterns:
+        if re.search(pattern, url):
+            raise Exception(
+                "INVALID_URL: This URL type is not supported. "
+                "Please provide a direct reel URL (e.g. https://www.instagram.com/reels/ABC123/)"
+            )
+    
     # Create temp directory if it doesn't exist
     temp_dir = getattr(settings, 'AUDIO_TEMP_DIR', tempfile.gettempdir())
     os.makedirs(temp_dir, exist_ok=True)
